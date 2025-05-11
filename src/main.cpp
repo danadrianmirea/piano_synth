@@ -1,6 +1,3 @@
-#include <iostream>
-#include <vector>
-#include <cmath>
 #include <JuceHeader.h>
 
 // Define M_PI if not defined (Windows compatibility)
@@ -8,86 +5,170 @@
 #define M_PI 3.14159265358979323846
 #endif
 
-// CheapPiano1 synth class based on SuperCollider's cheapPiano1
-class CheapPiano1 {
+class SimplePianoSound : public juce::SynthesiserSound {
 public:
-  CheapPiano1(double sampleRate) : sampleRate(sampleRate) {}
+  SimplePianoSound() {}
 
-  // Process one sample of the synth
-  double process(double freq, double amp, double att, double rel, double pan, double tone, double hollowness) {
-    // Compute envelope using a simple exponential decay
-    double env = amp * std::exp(-t / (rel * sampleRate));
-    if (t < att * sampleRate) {
-      env = amp * (t / (att * sampleRate));
+  bool appliesToNote(int midiNoteNumber) override {
+    return true; // This sound can play any note
+  }
+
+  bool appliesToChannel(int midiChannel) override {
+    return true; // This sound can play on any channel
+  }
+};
+
+class SimplePianoVoice : public juce::SynthesiserVoice {
+public:
+  SimplePianoVoice() : t(0) {}
+
+  bool canPlaySound(juce::SynthesiserSound* sound) override {
+    return dynamic_cast<SimplePianoSound*>(sound) != nullptr;
+  }
+
+  void startNote(int midiNoteNumber, float velocity, juce::SynthesiserSound*, int currentPitchWheelPosition) override {
+    freq = juce::MidiMessage::getMidiNoteInHertz(midiNoteNumber);
+    amp = velocity;
+    t = 0;
+    isPlaying = true;
+  }
+
+  void stopNote(float velocity, bool allowTailOff) override {
+    isPlaying = false;
+  }
+
+  void controllerMoved(int, int) override {}
+  void pitchWheelMoved(int) override {}
+
+  void renderNextBlock(juce::AudioBuffer<float>& outputBuffer, int startSample, int numSamples) override {
+    if (!isPlaying) return;
+
+    for (int sample = 0; sample < numSamples; ++sample) {
+      // Compute envelope using a simple exponential decay
+      double env = amp * std::exp(-t / (rel * sampleRate));
+      if (t < att * sampleRate) {
+        env = amp * (t / (att * sampleRate));
+      }
+
+      // Compute hammer excitation (simplified as a decaying sine)
+      double hammerFreq = tone * 1000 + 1000; // Map tone to frequency range
+      double hammer = 0.25 * std::sin(2 * M_PI * hammerFreq * t / sampleRate) * std::exp(-t / (0.04 * sampleRate));
+
+      // Delay line simulation (simplified as a comb filter)
+      double delay = 1.0 / freq;
+      double snd = hammer;
+      // Apply a simple comb filter effect
+      snd = snd + 0.5 * snd * std::exp(-delay * sampleRate);
+
+      // Apply high-pass filter (simplified)
+      double hpfFreq = hollowness * 1000 + 50;
+      snd = snd * (1 - std::exp(-2 * M_PI * hpfFreq / sampleRate));
+
+      // Apply envelope
+      snd *= env;
+
+      // Apply panning (stereo output)
+      double left = snd * (1 - pan);
+      double right = snd * (1 + pan);
+
+      // Write to output buffer
+      outputBuffer.addSample(0, startSample + sample, left);
+      outputBuffer.addSample(1, startSample + sample, right);
+
+      t++;
     }
-    t++;
-
-    // Compute hammer excitation (simplified as a decaying sine)
-    double hammerFreq = tone * 1000 + 1000; // Map tone to frequency range
-    double hammer = 0.25 * std::sin(2 * M_PI * hammerFreq * t / sampleRate) * std::exp(-t / (0.04 * sampleRate));
-
-    // Delay line simulation (simplified as a comb filter)
-    double delay = 1.0 / freq;
-    double snd = hammer;
-    // Apply a simple comb filter effect
-    snd = snd + 0.5 * snd * std::exp(-delay * sampleRate);
-
-    // Apply high-pass filter (simplified)
-    double hpfFreq = hollowness * 1000 + 50;
-    snd = snd * (1 - std::exp(-2 * M_PI * hpfFreq / sampleRate));
-
-    // Apply envelope
-    snd *= env;
-
-    // Apply panning (stereo output)
-    double left = snd * (1 - pan);
-    double right = snd * (1 + pan);
-
-    return (left + right) / 2; // Mono output for simplicity
   }
 
 private:
-  double sampleRate;
+  double freq = 440.0;
+  double amp = 0.0;
   int t = 0;
+  bool isPlaying = false;
+
+  // Synth parameters
+  const double att = 0.01;
+  const double rel = 1.3;
+  const double pan = 0.0;
+  const double tone = 0.5;
+  const double hollowness = 0.2;
+  const double sampleRate = 44100.0;
+};
+
+class SimplePianoSynth : public juce::Synthesiser {
+public:
+  SimplePianoSynth() {
+    // Add voices
+    for (int i = 0; i < 8; ++i) {
+      addVoice(new SimplePianoVoice());
+    }
+    // Add sound
+    addSound(new SimplePianoSound());
+  }
+};
+
+class MainComponent : public juce::AudioAppComponent {
+public:
+  MainComponent() {
+    setAudioChannels(0, 2); // 0 input channels, 2 output channels
+    synth.addVoice(new SimplePianoVoice());
+    synth.addSound(new SimplePianoSound());
+  }
+
+  ~MainComponent() override {
+    shutdownAudio();
+  }
+
+  void prepareToPlay(int samplesPerBlockExpected, double sampleRate) override {
+    synth.setCurrentPlaybackSampleRate(sampleRate);
+  }
+
+  void getNextAudioBlock(const juce::AudioSourceChannelInfo& bufferToFill) override {
+    bufferToFill.clearActiveBufferRegion();
+    juce::MidiBuffer midiBuffer;
+    synth.renderNextBlock(*bufferToFill.buffer, midiBuffer, bufferToFill.startSample, bufferToFill.numSamples);
+  }
+
+  void releaseResources() override {}
+
+  SimplePianoSynth synth;
+
+private:
+  JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
 
 int main() {
-  // Initialize JUCE
   juce::ScopedJuceInitialiser_GUI juceInit;
 
-  // Create audio device manager
-  juce::AudioDeviceManager deviceManager;
-  deviceManager.initialise(0, 2, nullptr, true);
+  MainComponent mainComponent;
+  mainComponent.prepareToPlay(512, 44100.0);
 
-  // Sample rate
-  double sampleRate = deviceManager.getCurrentAudioDevice()->getCurrentSampleRate();
+  // Create a window to keep the application running
+  /*
+  juce::DocumentWindow window("Piano Synth", juce::Colours::black, juce::DocumentWindow::allButtons);
+  window.setUsingNativeTitleBar(true);
+  window.setResizable(true, true);
+  window.setContentOwned(&mainComponent, true);
+  window.setVisible(true);
+  */
 
-  // Create CheapPiano1 instance
-  CheapPiano1 piano(sampleRate);
+  // Create a sequence of notes (C major scale)
+  const int baseNote = 60; // Middle C
+  const float noteDuration = 0.5f; // Half a second per note
+  const int numNotes = 8;
 
-  // Major scale frequencies (C4 to C5)
-  std::vector<double> frequencies = { 261.63, 293.66, 329.63, 349.23, 392.00, 440.00, 493.88, 523.25 };
+  // Start playing notes with proper timing
+  for (int i = 0; i < numNotes; ++i) {
+    // Note on
+    mainComponent.synth.noteOn(1, baseNote + i, 0.8f);
 
-  // Synth parameters
-  double amp = 0.3;
-  double att = 0.01;
-  double rel = 1.3;
-  double pan = 0.0;
-  double tone = 0.5;
-  double hollowness = 0.2;
+    // Wait for the note duration
+    juce::Thread::sleep(static_cast<int>(noteDuration * 1000));
 
-  // Generate audio for each note
-  for (double freq : frequencies) {
-    std::cout << "Playing note: " << freq << " Hz" << std::endl;
-    // Simulate playing the note for 1 second
-    for (int i = 0; i < sampleRate; i++) {
-      double sample = piano.process(freq, amp, att, rel, pan, tone, hollowness);
-      // Here you would typically write the sample to a buffer or audio output
-      // For now, we'll just print the first sample of each note
-      if (i == 0) {
-        std::cout << "Sample: " << sample << std::endl;
-      }
-    }
+    // Note off
+    mainComponent.synth.noteOff(1, baseNote + i, 0.8f, true);
+
+    // Small gap between notes
+    juce::Thread::sleep(100);
   }
 
   return 0;

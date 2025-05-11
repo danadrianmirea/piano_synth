@@ -5,6 +5,23 @@
 #define M_PI 3.14159265358979323846
 #endif
 
+// Configuration structure for piano parameters
+struct PianoConfig {
+  double attackTime = 0.005;    // Attack time in seconds
+  double releaseTime = 0.8;     // Release time in seconds
+  double pan = 0.0;            // Stereo pan (-1.0 to 1.0)
+  double hollowness = 0.3;     // High-pass filter control
+  double hammerStrength = 0.3;  // Hammer excitation strength
+  double harmonicMix = 0.5;    // Harmonic content mix
+};
+
+// Configuration structure for note parameters
+struct NoteConfig {
+  double frequency;  // Frequency in Hz
+  float velocity;
+  double duration;  // Duration in seconds
+};
+
 class SimplePianoSound : public juce::SynthesiserSound {
 public:
   SimplePianoSound() {}
@@ -20,7 +37,13 @@ public:
 
 class SimplePianoVoice : public juce::SynthesiserVoice {
 public:
-  SimplePianoVoice() : t(0) {}
+  SimplePianoVoice() : t(0) {
+    config = PianoConfig();  // Default config
+  }
+
+  void setConfig(const PianoConfig& newConfig) {
+    config = newConfig;
+  }
 
   bool canPlaySound(juce::SynthesiserSound* sound) override {
     return dynamic_cast<SimplePianoSound*>(sound) != nullptr;
@@ -50,36 +73,34 @@ public:
     if (!isPlaying) return;
 
     for (int sample = 0; sample < numSamples; ++sample) {
-      // Compute envelope using a more natural piano-like decay
-      double env = amp * std::exp(-t / (rel * sampleRate));
-      if (t < att * sampleRate) {
-        env = amp * (t / (att * sampleRate));
+      // Compute envelope using configurable parameters
+      double env = amp * std::exp(-t / (config.releaseTime * sampleRate));
+      if (t < config.attackTime * sampleRate) {
+        env = amp * (t / (config.attackTime * sampleRate));
       }
 
-      // Compute hammer excitation with better frequency mapping
-      double hammerFreq = freq * 2.0; // Use note frequency for hammer
-      double hammer = 0.3 * std::sin(2 * M_PI * hammerFreq * t / sampleRate) * std::exp(-t / (0.02 * sampleRate));
+      // Compute hammer excitation with configurable strength
+      double hammerFreq = freq * 2.0;
+      double hammer = config.hammerStrength * std::sin(2 * M_PI * hammerFreq * t / sampleRate) * std::exp(-t / (0.02 * sampleRate));
 
-      // Main tone generation with proper frequency
+      // Main tone generation with harmonics
       double snd = std::sin(2 * M_PI * freq * t / sampleRate);
-
-      // Add some harmonics for richness
-      snd += 0.5 * std::sin(4 * M_PI * freq * t / sampleRate);
-      snd += 0.25 * std::sin(6 * M_PI * freq * t / sampleRate);
+      snd += config.harmonicMix * std::sin(4 * M_PI * freq * t / sampleRate);
+      snd += (config.harmonicMix * 0.5) * std::sin(6 * M_PI * freq * t / sampleRate);
 
       // Mix hammer and tone
       snd = snd * 0.7 + hammer * 0.3;
 
-      // Apply high-pass filter for brightness control
-      double hpfFreq = hollowness * 2000 + 100;
+      // Apply high-pass filter with configurable hollowness
+      double hpfFreq = config.hollowness * 2000 + 100;
       snd = snd * (1 - std::exp(-2 * M_PI * hpfFreq / sampleRate));
 
       // Apply envelope
       snd *= env;
 
-      // Apply panning (stereo output)
-      double left = snd * (1 - pan);
-      double right = snd * (1 + pan);
+      // Apply configurable panning
+      double left = snd * (1 - config.pan);
+      double right = snd * (1 + config.pan);
 
       // Write to output buffer
       outputBuffer.addSample(0, startSample + sample, left);
@@ -94,12 +115,7 @@ private:
   double amp = 0.0;
   int t = 0;
   bool isPlaying = false;
-
-  // Synth parameters - adjusted for better piano sound
-  const double att = 0.005;  // Faster attack
-  const double rel = 0.8;    // Shorter release
-  const double pan = 0.0;
-  const double hollowness = 0.3;
+  PianoConfig config;
   const double sampleRate = 44100.0;
 };
 
@@ -115,19 +131,22 @@ public:
   }
 };
 
-class MainComponent : public juce::AudioAppComponent, public juce::Timer {
+class MainComponent : public juce::AudioAppComponent {
 public:
-  MainComponent() {
-    setAudioChannels(0, 2); // 0 input channels, 2 output channels
-    synth.addVoice(new SimplePianoVoice());
-    synth.addSound(new SimplePianoSound());
+  MainComponent(const std::vector<NoteConfig>& notes, const PianoConfig& pianoConfig)
+    : noteSequence(notes), hasStartedPlaying(false) {
+    // Configure synth
+    for (int i = 0; i < synth.getNumVoices(); ++i) {
+      if (auto* voice = dynamic_cast<SimplePianoVoice*>(synth.getVoice(i))) {
+        voice->setConfig(pianoConfig);
+      }
+    }
 
-    // Start the audio thread
-    startTimer(500);
+    // Initialize audio with 2 output channels
+    setAudioChannels(0, 2);
   }
 
   ~MainComponent() override {
-    stopTimer();
     shutdownAudio();
   }
 
@@ -141,42 +160,124 @@ public:
     synth.renderNextBlock(*bufferToFill.buffer, midiBuffer, bufferToFill.startSample, bufferToFill.numSamples);
   }
 
-  void releaseResources() override {}
+  void releaseResources() override {
+    // Clean up any resources if needed
+  }
 
-  void timerCallback() override {
-    if (currentNote < 8) {
-      // Note on
-      synth.noteOn(1, 60 + currentNote, 0.8f);
-
-      // Schedule note off
-      juce::Timer::callAfterDelay(500, [this]() {
-        synth.noteOff(1, 60 + currentNote, 0.8f, true);
-
-        // If this was the last note, schedule application close
-        if (currentNote == 7) {
-          juce::Timer::callAfterDelay(1000, []() {
-            juce::JUCEApplication::getInstance()->systemRequestedQuit();
-            });
-        }
+  void playNextNote() {
+    if (currentNote >= noteSequence.size()) {
+      std::cout << "Finished playing all notes. Waiting for final release..." << std::endl;
+      // Wait for the last note to finish releasing before quitting
+      juce::Timer::callAfterDelay(static_cast<int>((noteSequence.back().duration + 1.0) * 1000), []() {
+        std::cout << "Final release complete, quitting..." << std::endl;
+        juce::JUCEApplication::quit();
         });
-
-      currentNote++;
+      return;
     }
+
+    const auto& note = noteSequence[currentNote];
+    size_t noteIndex = currentNote;  // Store current index before incrementing
+
+    // Convert frequency to MIDI note number
+    int midiNote = static_cast<int>(std::round(69.0 + 12.0 * std::log2(note.frequency / 440.0)));
+
+    std::cout << "Starting note " << noteIndex << " (MIDI: " << midiNote
+      << ", Freq: " << note.frequency << "Hz, Duration: " << note.duration << "s)" << std::endl;
+
+    // Play the note
+    synth.noteOn(1, midiNote, note.velocity);
+
+    // Schedule note off after the specified duration
+    juce::Timer::callAfterDelay(static_cast<int>(note.duration * 1000), [this, midiNote, noteIndex]() {
+      std::cout << "Stopping note " << noteIndex << " (MIDI: " << midiNote << ")" << std::endl;
+      synth.noteOff(1, midiNote, 0.0f, true);
+
+      // Schedule next note to start after a small gap (50ms) to ensure clean note transitions
+      juce::Timer::callAfterDelay(50, [this]() {
+        std::cout << "Scheduling next note..." << std::endl;
+        ++currentNote;  // Move to next note after scheduling
+        playNextNote();
+        });
+      });
   }
 
   SimplePianoSynth synth;
-  int currentNote = 0;
+  std::vector<NoteConfig> noteSequence;
+  size_t currentNote = 0;
 
 private:
+  bool hasStartedPlaying;
   JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(MainComponent)
 };
 
 int main() {
   juce::ScopedJuceInitialiser_GUI juceInit;
-  auto* mainComponent = new MainComponent();
 
-  // Start the audio processing and run the message loop
+  // Configure piano parameters
+  PianoConfig pianoConfig;
+  pianoConfig.attackTime = 0.01;    // Slightly longer attack for clarity
+  pianoConfig.releaseTime = 0.5;    // Shorter release to prevent overlapping
+  pianoConfig.pan = 0.0;
+  pianoConfig.hollowness = 0.2;     // Reduced hollowness for clearer tone
+  pianoConfig.hammerStrength = 0.2;  // Reduced hammer strength
+  pianoConfig.harmonicMix = 0.4;    // Slightly reduced harmonic content
+
+  // Define the note sequence with frequencies in Hz
+  std::vector<NoteConfig> notes = {
+    {261.63, 0.8f, 0.4},  // C4
+    {293.66, 0.8f, 0.4},  // D4
+    {329.63, 0.8f, 0.4},  // E4
+    {349.23, 0.8f, 0.4},  // F4
+    {392.00, 0.8f, 0.4},  // G4
+    {440.00, 0.8f, 0.4},  // A4
+    {493.88, 0.8f, 0.4},  // B4
+    {523.25, 0.8f, 0.4}   // C5
+  };
+
+  // Happy Birthday melody
+  std::vector<NoteConfig> notes_happy_birthday = {
+    // Happy Birthday to you
+    {261.63, 0.8f, 0.9},  // C4
+    {261.63, 0.8f, 0.9},  // C4
+    {293.66, 0.8f, 0.9},  // D4
+    {261.63, 0.8f, 0.9},  // C4
+    {349.23, 0.8f, 0.9},  // F4
+    {329.63, 0.8f, 1.8},  // E4 (longer note)
+
+    // Happy Birthday to you
+    {261.63, 0.8f, 0.9},  // C4
+    {261.63, 0.8f, 0.9},  // C4
+    {293.66, 0.8f, 0.9},  // D4
+    {261.63, 0.8f, 0.9},  // C4
+    {392.00, 0.8f, 0.9},  // G4
+    {349.23, 0.8f, 1.8},  // F4 (longer note)
+
+    // Happy Birthday dear [name]
+    {261.63, 0.8f, 0.9},  // C4
+    {261.63, 0.8f, 0.9},  // C4
+    {523.25, 0.8f, 0.9},  // C5
+    {440.00, 0.8f, 0.9},  // A4
+    {349.23, 0.8f, 0.9},  // F4
+    {329.63, 0.8f, 0.9},  // E4
+    {293.66, 0.8f, 1.8},  // D4 (longer note)
+
+    // Happy Birthday to you
+    {466.16, 0.8f, 0.9},  // A#4
+    {466.16, 0.8f, 0.9},  // A#4
+    {440.00, 0.8f, 0.9},  // A4
+    {349.23, 0.8f, 0.9},  // F4
+    {392.00, 0.8f, 0.9},  // G4
+    {349.23, 0.8f, 1.8}   // F4 (longer note)
+  };
+
+  auto* mainComponent = new MainComponent(notes_happy_birthday, pianoConfig);
   mainComponent->prepareToPlay(512, 44100.0);
+
+  // Add a small delay to ensure audio system is fully initialized before starting playback
+  juce::Timer::callAfterDelay(100, [mainComponent]() {
+    mainComponent->playNextNote();
+    });
+
   juce::MessageManager::getInstance()->runDispatchLoop();
 
   return 0;

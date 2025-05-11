@@ -123,7 +123,7 @@ public:
     synth.addSound(new SimplePianoSound());
 
     // Start the audio thread
-    startTimer(500); // 50ms timer for note timing
+    startTimer(500);
   }
 
   ~MainComponent() override {

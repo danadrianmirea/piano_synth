@@ -173,21 +173,10 @@ private:
 
 int main() {
   juce::ScopedJuceInitialiser_GUI juceInit;
-
-  // Create the main window
-  juce::DocumentWindow mainWindow("Piano Synth", juce::Colours::lightgrey, juce::DocumentWindow::allButtons);
-
-  // Create and set the main component
   auto* mainComponent = new MainComponent();
-  mainWindow.setContentOwned(mainComponent, true);
-  mainWindow.setResizable(true, true);
-  mainWindow.setSize(800, 600);
-  mainWindow.setVisible(true);
 
-  // Start the audio processing
+  // Start the audio processing and run the message loop
   mainComponent->prepareToPlay(512, 44100.0);
-
-  // Run the message loop
   juce::MessageManager::getInstance()->runDispatchLoop();
 
   return 0;
